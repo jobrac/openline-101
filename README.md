@@ -1,6 +1,6 @@
 # Globe AT HOME 5G WIFI (rain101 / the101) — Full Openline & Root Access
 
-> **Status as of 2026-06-27:** Fully unlocked, TR-069 killed, survives reboot.
+> **Status as of 2026-06-28:** Fully unlocked, TR-069 killed, survives reboot. Pre-patched binaries available.
 > Developer UI works directly — no proxy needed. Log in as admin and hidden menus appear.
 
 ![PLMN unlocked — modem ready for any SIM](images/openline-proof.png)
@@ -106,10 +106,14 @@ secret_1() {
 
 **YOUR password will be different** because your MAC address is different. To find your admin password:
 
-1. **If you can log into the web UI** — you already know it. It's printed on a sticker on the bottom of the router, or was set during initial setup. Try `admin123` (the hardcoded fallback) first.
-2. **If you have SSH access** — `cat /data/jytl_factory/2g_mac` to get your MAC, then run the formula above.
-3. **If you have the router's box/sticker** — the MAC is printed on it. Use the last 6 characters.
-4. **If none of the above** — you need to find the MAC another way (ARP table from your DHCP server, WiFi MAC + 1, etc.).
+1. **Check the sticker on the bottom of the router** — the admin password is usually printed there.
+2. **If you can log into the web UI** — you already know it. Try `admin123` (the hardcoded fallback) first, then what's on the sticker.
+3. **If you have SSH access** — `cat /data/jytl_factory/2g_mac` to get your MAC, then run the formula above.
+4. **If you have the router's box** — the MAC is printed on it. Use the last 6 characters.
+5. **If you know the MAC of the router's WiFi network** — the admin password is derived from the last 6 hex digits of the MAC address.
+6. **If all else fails and you know the MAC** — use the `secret_1()` formula shown above to derive the password. The seed is `"JY" + last_6_chars_of_mac`.
+
+**After factory reset**, the password stays the same (it's derived from MAC, which doesn't change). If the password isn't working after reset, try the `superadmin` / `developer#888` backdoor — this account exists on factory firmware and survives reset.
 
 **The example password shown throughout this README is NOT your password. Substitute YOUR admin password everywhere you see it.**
 
@@ -186,7 +190,8 @@ This is only useful if you have the serial number (printed on the box/sticker) a
 | **iperf3 open port** | ❌ KILLED | iperf_service removed (port 5201) | Open speed test server accessible to anyone on LAN or WAN — not needed, potential abuse vector |
 | **ACL token validation** | ❌ BYPASSED | debug_mode=99 checked FIRST in dtoken.lua | Developer mode skips token checks entirely — no need to generate/manage tokens |
 | **rpcd ACL restrictions** | ❌ BYPASSED | luci-base.json patched with wildcard access | Unlocks all ubus methods (getMenu, hidden pages) that were restricted to specific user groups |
-| **Dev mode file deletion** | ❌ BLOCKED | /bin/rm wrapper prevents deletion of jy_developer_* files | Lua bytecode modules periodically try to delete dev mode flags — this stops them |
+| **Dev mode file deletion** | ❌ PREVENTED | dtoken.lua bypass returns before any cleanup logic | Lua bytecode modules periodically try to delete dev mode flags — the bypass short-circuits them |
+| **rm wrapper** | ❌ REMOVED | Previous versions installed a /bin/rm wrapper; it caused web UI login failures after reboot and has been removed |
 | **LuCI ACL gate** | ❌ BYPASSED | All super/restricted methods accessible without token | Full access to every hidden page and privileged ubus call |
 
 ---
@@ -195,8 +200,16 @@ This is only useful if you have the serial number (printed on the box/sticker) a
 
 ```
 ├── README.md                    # This file — read it all before doing anything
-├── openline.py                  # One-shot script: enables SSH root access
-├── harden.sh                    # Hardening script: kills backdoors, patches ACL
+├── openline.py                  # One-shot: enables SSH, copies patches, runs harden.sh
+├── harden.sh                    # Hardening: installs pre-patched files, kills backdoors
+├── binaries/                    # Pre-patched drop-in files (firmware-specific)
+│   └── v7.00.02g/
+│       ├── push.sh              # Quick-install: scp + run on router
+│       ├── install.sh           # Router-side installer
+│       ├── dtoken.lua           # Patched ACL module (4 fixes applied)
+│       ├── devmode              # Boot init script (S97devmode)
+│       ├── luci-base.json       # rpcd ACL with wildcard luci access
+│       └── firewall.user        # Firewall rules (MQTT/ACS blocks)
 └── images/
     └── openline-proof.png       # Screenshot showing PLMN unlocked
 ```
@@ -215,7 +228,7 @@ This router runs **OpenWRT** under the hood — a standard open-source router OS
 
 **2. Password formulas are in the firmware.** The admin password is MAC-derived via `secret_1()` (a shell function in the read-only squashfs). The root SSH password is SHA256-derived from the serial number. Both formulas are visible in the extracted rootfs. Once you have your device's MAC or SN, you can compute the default passwords.
 
-**3. Dev mode bypasses everything.** Rain built a developer mode (`debug_mode`) into their LuCI fork. When the flag file `/data/jytl_factory/debug_mode` is set to `99`, it's *supposed* to bypass ACL checks and unlock hidden pages — but the original dtoken.lua had bugs that made the bypass ineffective (wrong variable returned, wrong check order). Fixing those bugs makes debug_mode=99 actually work.
+**3. Dev mode bypasses everything.** Rain built a developer mode (`debug_mode`) into their LuCI fork. When the flag file `/data/jytl_factory/debug_mode` is set to `99`, it's *supposed* to bypass ACL checks and unlock hidden pages — but the original `dtoken.lua` had **four bugs** that made the bypass completely ineffective: `get_debug_mode()` returned the wrong variable (nil instead of 99), making `is_debug_mode()` always return false; `auth_ubus_acl()` and `check_luci_acl_st()` checked tokens before the debug_mode flag; and the compiled `jt_system.lua` controller (which the Vue frontend polls to decide if it should show hidden pages) called `get_developmode()` which returned 0 when tokens didn't match, regardless of debug_mode. Fixing all four makes debug_mode=99 actually unlock the UI.
 
 **4. TR-069 is the carrier's remote kill-switch.** Like most ISP-provided routers, this device runs a CWMP daemon (`easycwmpd`) that phones home to Rain's ACS server every hour. Through TR-069, the carrier can push config changes, firmware updates, or remotely lock the device. Killing it is step one.
 
@@ -245,6 +258,8 @@ Each step builds on the previous one. The scripts automate this chain, but the u
 python3 openline.py --admin-pw YOUR_ADMIN_PASSWORD
 ```
 
+**This is now the only command you need.** It does both openline AND hardening, then prompts you to reboot.
+
 If you don't specify `--admin-pw`, the script falls back to a built-in default — **this is almost certainly wrong for your device.** Always pass your own password. Alternatively, set it via environment variable:
 
 ```bash
@@ -252,86 +267,54 @@ export THE101_ADMIN_PW="your_admin_password"
 python3 openline.py
 ```
 
-**What this does:**
-1. Logs into the router web UI as `admin` via ubus (using `session.login` — no auth required for the login call itself)
+**What Phase 1 does (6 steps):**
+1. Logs into the router as `admin` via ubus (using `session.login`)
 2. Sets root password (default: `root123` — **change it after**)
-3. Starts the dropbear SSH server
-4. Removes the PLMN carrier lock
-5. SSH's in to make dropbear config permanent (survives reboot)
-6. Installs your SSH public key (`~/.ssh/openline_rain101.pub`) if it exists
+3. Escalates to root session
+4. Starts dropbear, writes your SSH public key via `file.write`, enables PasswordAuth via `uci.set`
+5. Removes the PLMN carrier lock
+6. Verifies SSH connectivity
 
-**If `pexpect` is not installed** (for the SSH auto-config step), the script still works — you just need to SSH in manually after:
+**What Phase 2 does (10 steps of harden.sh):**
+1. Kills TR-069 remote management
+2. Enables debug_mode=99 + super_admin=1
+3. Installs pre-patched files (dtoken.lua, devmode init, rpcd ACL, firewall rules)
+4. Removes rm wrapper (it blocks web UI login after reboot)
+5. Cleans SSH authorized_keys + enables password auth
+6. Kills geo-lock chain (GPS, cloud MQTT)
+7. Disables backdoors (telnet, ADB, AT agent)
+8. Kills phone-home services (udpApp, bulk_inform, cert_sync, iperf3)
+9. Firewalls AT command ports (localhost only)
+10. Persists debug_mode + super_admin in rc.local, then restarts rpcd/uhttpd
 
-```bash
-ssh root@192.168.0.1
-# then run:
-uci set dropbear.@dropbear[0].PasswordAuth=on
-uci set dropbear.@dropbear[0].RootPasswordAuth=on
-uci commit dropbear
-/etc/init.d/dropbear enable
-/etc/init.d/dropbear restart
-```
-
-### Step 2: Harden the Router (`harden.sh`)
-
-**⚠️ Run this AFTER `openline.py` succeeds.** The hardening script needs SSH access.
-
-Pipe directly over SSH:
-```bash
-ssh root@192.168.0.1 "sh -s" < harden.sh
-```
-
-Or copy to router first:
-```bash
-scp harden.sh root@192.168.0.1:/tmp/
-ssh root@192.168.0.1 "sh /tmp/harden.sh"
-```
-
-**What this does (12 steps):**
-
-| Step | Action | Why |
-|---|---|---|
-| 1 | Kill TR-069 | Stops remote carrier management backdoor |
-| 2 | Enable debug_mode=99 | Permanent ACL bypass — survives reboot |
-| 3 | Patch dtoken.lua | Fix 3 bugs: bypass ordering, function return values |
-| 4 | Install rm wrapper | Prevents Lua bytecode modules from deleting dev mode files |
-| 5 | Fix rpcd ACL | Wildcards `luci` methods so super methods reach dtoken.lua |
-| 6 | Create boot init script | Recreates dev mode files at every boot |
-| 7 | Remove SSH backdoors | Deletes 7 manufacturer keys, keeps only yours |
-| 8 | Kill geo-lock chain | Disables GPS + location daemons, blocks cloud enforcement |
-| 9 | Disable backdoors | Kills telnetd, renames adbd_usb, kills ate_agent |
-| 10 | Kill phone-home services | Removes udpApp, bulk_inform, cert_sync, iperf3 |
-| 11 | Firewall AT ports | Blocks LAN access to modem AT ports (localhost only) |
-| 12 | Reinforce ACS block | Persists iptables rules to firewall.user |
-
-### Step 3: Verify
-
-After hardening, reboot the router and verify everything persists:
-
-```bash
-# SSH should still work
-ssh root@192.168.0.1
-
-# Dev mode should survive
-cat /data/jytl_factory/debug_mode    # → 99
-
-# TR-069 should be dead
-ps | grep easycwmp                    # → nothing
-
-# Check key hardening was applied
-cat /etc/dropbear/authorized_keys     # → only your key
-ls /etc/rc.d/S90easycwmpd             # → file not found
-```
-
-Then log into `http://192.168.0.1` with your admin password. Hidden developer pages (PLMN Lock, Band Lock, GPS, Developer Mode, Diagnosis, Network Tools) should appear in the menu — **no proxy needed**.
+**If `pexpect` is not installed** (for the SSH auto-config step), the script still enables SSH access — Phase 1 completes using ubus alone. Phase 2 will prompt you to SSH in manually.
 
 ---
 
 ## 🌐 DEVELOPER UI (HIDDEN PAGES)
 
-### Method 1: Direct Login (After Hardening — Recommended)
+After hardening, developer mode functionality is enabled via:
+- `debug_mode=99` (ACL bypass)
+- `super_admin=1` (unlocks hidden menu items)
+- Patched `dtoken.lua` (debug_mode bypass at top of auth functions)
+- Wildcard rpcd ACL (all luci methods accessible)
 
-Log in at `http://192.168.0.1` with your admin password. All hidden menus appear automatically — the server-side ACL bypass (debug_mode=99 + patched dtoken.lua + wildcard rpcd ACL) handles everything.
+Log in at `http://192.168.0.1` with your admin password. If your firmware version's menu includes developer pages, they will appear automatically.
+
+If the developer mode PAGE (`/#/developerMode`) shows a 404, this is a Vue app routing limitation — the core developer functionality (ACL bypass, ubus access) is still active regardless.
+
+### Recovery if Web UI Breaks
+
+If the web UI returns 403 on all requests after hardening, a mismatched dtoken.lua patch may have been applied. The script now validates patches before committing and rolls back on failure. If you still get locked out:
+
+```bash
+# SSH in and fix the token issue:
+ssh root@192.168.0.1
+/bin/busybox rm -f /tmp/jy_developer_token /tmp/jy_developer_mode
+# Or restore dtoken.lua from backup:
+cp /usr/lib/lua/luci/dtoken.lua.orig /usr/lib/lua/luci/dtoken.lua
+/etc/init.d/rpcd restart
+```
 
 ### Method 2: Direct API Calls (No Browser)
 
@@ -441,16 +424,11 @@ A firmware upgrade from Rain will:
 
 If you factory reset the router:
 
-1. **Set the admin web password** (needed for ubus authentication) — log into `http://192.168.0.1` and set it, or use the default `admin123`
-2. **Run `openline.py`** with your admin password:
+1. **Run `openline.py`** with your admin password (it does both openline + harden in one shot):
    ```bash
    python3 openline.py --admin-pw YOUR_ADMIN_PASSWORD
    ```
-3. **Run the hardening script:**
-   ```bash
-   ssh root@192.168.0.1 "sh -s" < harden.sh
-   ```
-4. **Reboot and verify** all steps survived
+2. **Say `y` when prompted to reboot**, then verify everything survived.
 
 ---
 
@@ -505,10 +483,11 @@ EOF
 
 1. **TR-069 Kill**: `easycwmpd` is the CWMP (CPE WAN Management Protocol) daemon that lets Rain remotely manage the router. We disable it in UCI, stop the service, remove its init symlinks, and kill any running processes.
 
-2. **ACL Bypass (debug_mode=99)**: The file `/data/jytl_factory/debug_mode` is on the persistent `/data` partition. When set to `99`, the patched `dtoken.lua` skips ALL ACL and token validation. Three fixes were needed in `dtoken.lua`:
-   - `get_developmode()` was returning the global `debug_mode` instead of the local `develop_mode` parameter
-   - `auth_ubus_acl()` checked token validity BEFORE the debug_mode bypass
-   - `check_luci_acl_st()` had the same ordering bug
+2. **ACL Bypass (debug_mode=99)**: The file `/data/jytl_factory/debug_mode` is on the persistent `/data` partition. When set to `99` and the dtoken.lua fixes are applied, all ACL and token validation is skipped. **Four fixes** were needed in `dtoken.lua`:
+   - `get_debug_mode()` had a typo — returned `develop_mode` (nil) instead of `debug_mode` (99). This made `is_debug_mode()` **always return false**, dead-coding all bypasses.
+   - `auth_ubus_acl()` checked token validity BEFORE `is_debug_mode()`. Moved bypass to top.
+   - `check_luci_acl_st()` had the same ordering bug. Moved bypass to top.
+   - `get_developmode()` added a `get_debug_mode() == 99` check at the top to return 1 immediately. Required because the compiled `jt_system.lua` controller (which the frontend polls for dev mode status) calls this function and we cannot edit compiled bytecode.
 
 3. **rpcd ACL Wildcard**: `/usr/share/rpcd/acl.d/luci-base.json` restricts which ubus methods each user group can call. The `luci-access` group's `luci` methods list was specific — super methods like `getMenu` weren't listed. We replace the method lists with `["*"]` (wildcard).
 
@@ -574,7 +553,7 @@ Physical UART at 921600 baud gives an immediate root shell. This is a hardware-l
 | `Connection refused` (SSH) | openline.py didn't complete | Run `openline.py` first, verify it printed "Done" |
 | `Permission denied` (SSH) | Wrong root password | Default is `root123`. If you changed it, use your password |
 | `lua: command not found` (harden.sh) | Lua not on router PATH | Should not happen — Lua is in stock firmware. Try running harden.sh on the router directly instead of piping |
-| Hidden pages not showing | debug_mode=99 not set or dtoken.lua not patched | SSH in and verify: `cat /data/jytl_factory/debug_mode` (should be `99`), check `grep "DEBUG MODE BYPASS" /usr/lib/lua/luci/dtoken.lua` |
+| Hidden pages not showing | `/tmp/jy_developer_*` files missing | SSH in: `/etc/init.d/devmode boot`. The compiled frontend controller polls `/cgi-bin/luci/admin/jt_system/get_develop_mode` which returns 0 if these files don't exist. |
 
 | TR-069 respawns after reboot | Init symlink survives | Verify: `ls /etc/rc.d/S90easycwmpd` should return "No such file" |
 | MQTT still connects after hardening | Firewall rules applied after MQTT started | Reboot: `reboot`. Firewall rules load early in boot before MQTT starts |

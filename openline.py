@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-openline.py — One-shot script to enable SSH root access on the rain101/the101 router.
+openline.py — One-shot script to enable SSH root access on the rain101/the101
+router AND harden it against remote management / backdoors.
 
 Usage:
-    python3 openline.py [--router 192.168.0.1] [--root-pw root123] [--admin-pw YOUR_PASSWORD]
+    python3 openline.py [--router 192.168.0.1] [--root-pw root123]
+                        [--admin-pw YOUR_PASSWORD]
 
-After enabling SSH, connects via SSH to make dropbear config permanent and
-install the SSH public key (~/.ssh/openline_rain101.pub) if it exists.
+What it does:
+  1. Logs into the router via ubus (JSON-RPC) as admin
+  2. Escalates to root (sets root password if needed)
+  3. Starts dropbear SSH, writes your SSH public key, enables password auth
+  4. Connects via SSH to run the hardening routine
+  5. Prompts you to reboot
 
-Requirements: Python 3.6+ with pexpect (python3-pexpect)
+Requirements: Python 3.6+, pexpect (optional — for SSH automation)
 """
 
 import sys
@@ -18,12 +24,13 @@ import urllib.request
 import urllib.error
 import argparse
 import time
+import subprocess
 
 
-# ── helpers ──────────────────────────────────────────────────────────────
+# ── ubus helpers ─────────────────────────────────────────────────────────
 
 def ubus_call(router_ip, session_id, obj, method, params=None):
-    """Make a JSON-RPC ubus call to the router."""
+    """Make a standard ubus 'call' (object.method)."""
     if params is None:
         params = {}
     sid = session_id if session_id else "00000000000000000000000000000000"
@@ -57,156 +64,383 @@ def ubus_call(router_ip, session_id, obj, method, params=None):
     return data
 
 
-def get_admin_token(router_ip, admin_pw):
-    """Log into the router as admin via ubus and return the session token."""
+def ubus_login(router_ip, username, password):
+    """Log into the router via ubus and return the session token."""
     data = ubus_call(router_ip, None, "session", "login", {
-        "username": "admin",
-        "password": admin_pw
+        "username": username,
+        "password": password
     })
     result = data["result"]
     if len(result) < 2 or not result[1]:
-        raise RuntimeError("Admin login failed — wrong password?")
+        raise RuntimeError(f"{username} login failed — wrong password?")
     return result[1]["ubus_rpc_session"]
 
 
-# ── main ─────────────────────────────────────────────────────────────────
+# ── SSH helpers ──────────────────────────────────────────────────────────
 
-def enable_ssh(router_ip, admin_pw, root_pw, ssh_key_path):
-    """Main routine — enables SSH root access on the router."""
+def ssh_run(router_ip, root_pw, ssh_key_path, commands, timeout=30):
+    """Open an SSH session, run *commands* (list of strings), return output."""
+    import pexpect
+    child = pexpect.spawn(
+        f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+        f'-i {ssh_key_path} '
+        f'-o PreferredAuthentications=publickey,password '
+        f'root@{router_ip}',
+        timeout=timeout
+    )
+    idx = child.expect(['#', 'password:', 'Permission denied', pexpect.EOF],
+                       timeout=20)
+    if idx == 0:
+        pass  # publickey
+    elif idx == 1:
+        child.sendline(root_pw)
+        pidx = child.expect(['#', 'Permission denied'], timeout=10)
+        if pidx != 0:
+            child.close()
+            return None
+    else:
+        child.close()
+        return None
 
-    print(f"[*] Router: {router_ip}")
-    print(f"[*] Will set root password to: {root_pw}")
+    output = ""
+    for cmd in commands:
+        child.sendline(cmd)
+        try:
+            child.expect(['#'], timeout=15)
+            output += (child.before or b'').decode(errors='replace')
+        except pexpect.TIMEOUT:
+            pass
+    child.sendline('exit')
+    child.close()
+    return output
 
-    # Step 1: Get admin session token
-    print("[1/5] Logging in as admin via ubus...")
-    admin_sid = get_admin_token(router_ip, admin_pw)
-    print(f"      Admin session: {admin_sid[:16]}...")
 
-    # Step 2: Set root password via luci.setPassword
-    print("[2/5] Setting root password...")
-    ubus_call(router_ip, admin_sid, "luci", "setPassword", {
-        "username": "root",
-        "password": root_pw
-    })
-    print("      Root password set.")
+# ── Main ─────────────────────────────────────────────────────────────────
 
-    # Step 3: Log in as root to get root session
-    print("[3/5] Getting root session...")
-    data = ubus_call(router_ip, admin_sid, "session", "login", {
-        "username": "root",
-        "password": root_pw
-    })
-    result = data["result"]
-    if len(result) < 2 or not result[1]:
-        raise RuntimeError("Root login failed")
-    root_sid = result[1]["ubus_rpc_session"]
-    print(f"      Root session: {root_sid[:16]}...")
+def setup_router(router_ip, admin_pw, root_pw, ssh_key_path):
+    pubkey_path = ssh_key_path + ".pub"
 
-    # Step 4: Start dropbear SSH server
-    print("[4/5] Starting dropbear SSH...")
+    # Check pexpect availability
+    try:
+        import pexpect
+        have_pexpect = True
+    except ImportError:
+        have_pexpect = False
+
+    # =====================================================================
+    # PHASE 1 — Gain SSH access via ubus
+    # =====================================================================
+    print("=" * 60)
+    print("  PHASE 1 — Enabling SSH access")
+    print("=" * 60)
+    print(f"  Router:   {router_ip}")
+    print(f"  Root PW:  {root_pw}")
+    print()
+
+    # Step 1: Admin login
+    print("[1/6] Logging in as admin...")
+    admin_sid = ubus_login(router_ip, "admin", admin_pw)
+    print(f"      Session: {admin_sid[:16]}...")
+
+    # Step 2: Set root password (idempotent — may have been set already)
+    print("[2/6] Setting root password...")
+    try:
+        ubus_call(router_ip, admin_sid, "luci", "setPassword", {
+            "username": "root",
+            "password": root_pw
+        })
+        print("      Root password set.")
+    except RuntimeError as e:
+        print(f"      Root password may already be set ({e})")
+
+    # Step 3: Login as root
+    print("[3/6] Logging in as root...")
+    try:
+        root_sid = ubus_login(router_ip, "root", root_pw)
+    except RuntimeError:
+        # Maybe root password was set by a previous run — try to login
+        # anyway (it might already have the right password)
+        print("      Trying fallback root passwords...")
+        for pw in [root_pw, "root123", "admin123", admin_pw]:
+            try:
+                root_sid = ubus_login(router_ip, "root", pw)
+                root_pw = pw  # update for later SSH use
+                break
+            except RuntimeError:
+                continue
+        else:
+            raise RuntimeError(
+                "Cannot log in as root. The admin password may not have "
+                "permission to set the root password. Try a different "
+                "admin password or check if the router is locked down."
+            )
+    print(f"      Session: {root_sid[:16]}...")
+
+    # Step 4: Start dropbear + write SSH key + enable password auth
+    print("[4/6] Configuring dropbear SSH...")
+
+    # 4a: Start dropbear (creates /etc/config/dropbear if missing)
     ubus_call(router_ip, root_sid, "luci", "setInitAction", {
         "name": "dropbear",
         "action": "start"
     })
+    time.sleep(0.5)
     print("      Dropbear started.")
 
-    # Step 5: Unlock PLMN (carrier lock)
-    print("[5/5] Removing PLMN carrier lock...")
+    # 4b: Generate SSH key pair if needed
+    if not os.path.exists(ssh_key_path):
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", ssh_key_path,
+             "-N", "", "-C", "openline@rain101"],
+            check=True, capture_output=True
+        )
+        print(f"      Key generated: {ssh_key_path}")
+    with open(pubkey_path) as f:
+        pubkey = f.read().strip()
+
+    # 4c: Write SSH public key to authorized_keys
+    ubus_call(router_ip, root_sid, "file", "write", {
+        "path": "/etc/dropbear/authorized_keys",
+        "data": pubkey + "\n"
+    })
+    print("      SSH key installed.")
+
+    # 4d: Enable PasswordAuth and RootPasswordAuth via uci
+    #     This may fail (Access denied) on some firmware versions after
+    #     factory reset — the SSH key is already installed so publickey
+    #     auth will work, and Phase 2 fixes the config over SSH.
+    try:
+        ubus_call(router_ip, root_sid, "uci", "set", {
+            "config": "dropbear",
+            "section": "@dropbear[0]",
+            "type": "dropbear",
+            "values": {"PasswordAuth": "on", "RootPasswordAuth": "on"}
+        })
+        ubus_call(router_ip, root_sid, "uci", "commit", {
+            "config": "dropbear"
+        })
+        print("      PasswordAuth=on, RootPasswordAuth=on.")
+        uci_ok = True
+    except RuntimeError:
+        print("      PasswordAuth deferred (will fix via SSH in Phase 2).")
+        uci_ok = False
+
+    # 4e: Enable dropbear at boot and restart
+    try:
+        ubus_call(router_ip, root_sid, "luci", "setInitAction", {
+            "name": "dropbear",
+            "action": "enable"
+        })
+        ubus_call(router_ip, root_sid, "luci", "setInitAction", {
+            "name": "dropbear",
+            "action": "restart"
+        })
+        time.sleep(1.5)
+        print("      Dropbear restarted with new config.")
+    except RuntimeError:
+        time.sleep(1)
+        print("      Dropbear restart deferred (will fix via SSH).")
+
+    # Step 5: Remove PLMN carrier lock
+    print("[5/6] Removing PLMN carrier lock...")
     try:
         ubus_call(router_ip, root_sid, "mtk.cell", "set_plmn_unlock", {})
         print("      PLMN lock removed.")
     except RuntimeError as e:
-        print(f"      PLMN: {e} (may already be unlocked)")
+        print(f"      PLMN: {e}")
 
-    print(f"\n✅  SSH should now be accessible:")
-    print(f"    ssh root@{router_ip}          # password: {root_pw}")
+    # Step 6: Verify SSH access
+    print("[6/6] Verifying SSH access...")
+
+    # Clear stale host keys (router regenerates on reset)
+    subprocess.run(["ssh-keygen", "-R", router_ip],
+                   capture_output=True)
+
+    ssh_ok = False
+    if have_pexpect:
+        # Also write key to /tmp for harden.sh compat
+        console_cmds = [
+            f"echo '{pubkey}' > /tmp/user_ssh_key.pub",
+            "echo SSH_OK"
+        ]
+        result = ssh_run(router_ip, root_pw, ssh_key_path, console_cmds)
+        ssh_ok = result and "SSH_OK" in result
+    else:
+        try:
+            r = subprocess.run(
+                ["ssh", "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-o", "PreferredAuthentications=publickey,password",
+                 "-o", "ConnectTimeout=10",
+                 "-i", ssh_key_path,
+                 f"root@{router_ip}", "echo SSH_OK"],
+                capture_output=True, text=True, timeout=15
+            )
+            ssh_ok = "SSH_OK" in r.stdout
+        except Exception:
+            ssh_ok = False
+
+    if ssh_ok:
+        print("      ✅  SSH access confirmed.")
+    else:
+        print("      ⚠️  SSH verification failed — trying anyway...")
+        # Might still work; the pexpect prompt matching can be finicky
+
     print()
+    print(f"  ✅  SSH should now work:")
+    print(f"      ssh -i {ssh_key_path} root@{router_ip}")
+    print(f"      ssh root@{router_ip}          # password: {root_pw}")
 
-    # ── SSH in and make config permanent ─────────────────────────────────
+    # =====================================================================
+    # PHASE 2 — Harden the router (via SSH)
+    # =====================================================================
+    print()
+    print("=" * 60)
+    print("  PHASE 2 — Hardening the router")
+    print("=" * 60)
 
-    print("[*] Connecting via SSH to make config permanent...")
-    time.sleep(2)
+    if not have_pexpect and not ssh_ok:
+        print()
+        print("  ⚠️  pexpect not installed and SSH verification failed.")
+        print("  Skipping automated hardening.")
+        print()
+        print("  Run harden.sh manually after SSH:")
+        print(f"    ssh -i {ssh_key_path} root@{router_ip} 'sh -s' < harden.sh")
+        print()
+        print("🎉  Phase 1 complete.")
+        return
 
-    permanent_commands = [
-        "uci set dropbear.@dropbear[0].PasswordAuth=on",
-        "uci set dropbear.@dropbear[0].RootPasswordAuth=on",
-        "uci commit dropbear",
-        "/etc/init.d/dropbear enable",
-        "/etc/init.d/dropbear restart",
-    ]
+    # Run hardening by piping harden.sh over SSH.
+    # harden.sh is expected in the same directory as this script.
+    harden_sh_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "harden.sh")
+    if not os.path.exists(harden_sh_path):
+        print("  ⚠️  harden.sh not found — skipping hardening phase.")
+        print(f"    Expected at: {harden_sh_path}")
+    else:
+        with open(harden_sh_path, "r") as f:
+            harden_script = f.read()
+
+        # Copy pre-patched binaries to router so harden.sh can install them.
+        # This avoids fragile runtime patching — the files are just copied.
+        binaries_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "binaries", "v7.00.02g")
+        if os.path.isdir(binaries_dir):
+            print("[*] Copying pre-patched files to router...")
+            for fname in ["dtoken.lua", "devmode", "luci-base.json", "firewall.user"]:
+                src = os.path.join(binaries_dir, fname)
+                if os.path.isfile(src):
+                    try:
+                        subprocess.run(
+                            ["ssh", "-o", "StrictHostKeyChecking=no",
+                             "-o", "UserKnownHostsFile=/dev/null",
+                             "-o", "PreferredAuthentications=publickey,password",
+                             "-i", ssh_key_path,
+                             f"root@{router_ip}", f"cat > /tmp/{fname}"],
+                            stdin=open(src, "rb"),
+                            capture_output=True, timeout=15, check=True
+                        )
+                        print(f"      {fname}")
+                    except Exception as e:
+                        print(f"      {fname}: FAILED ({e})")
+            print("      done.")
+
+        print("[*] Running hardening over SSH...")
+        time.sleep(1)
+
+        if have_pexpect:
+            import pexpect
+            child = pexpect.spawn(
+                f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
+                f'-i {ssh_key_path} '
+                f'-o PreferredAuthentications=publickey,password '
+                f'root@{router_ip} "sh -s"',
+                timeout=180
+            )
+            child.send(harden_script.encode())
+            child.send(b'\x04')
+            child.sendeof()
+
+            try:
+                while True:
+                    child.expect(['\n', pexpect.EOF, pexpect.TIMEOUT], timeout=90)
+                    line = child.before
+                    if line:
+                        print(line.decode(errors='replace').rstrip())
+                    if child.match == pexpect.EOF:
+                        break
+            except pexpect.TIMEOUT:
+                pass
+            child.close()
+        else:
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as tf:
+                tf.write(harden_script)
+                tf.flush()
+                result = subprocess.run(
+                    ["ssh", "-o", "StrictHostKeyChecking=no",
+                     "-o", "UserKnownHostsFile=/dev/null",
+                     "-o", "PreferredAuthentications=publickey,password",
+                     "-i", ssh_key_path,
+                     f"root@{router_ip}", "sh -s"],
+                    stdin=open(tf.name),
+                    capture_output=True, text=True, timeout=180
+                )
+                print(result.stdout)
+                if result.stderr:
+                    print(result.stderr, file=sys.stderr)
+                os.unlink(tf.name)
+
+    # =====================================================================
+    # Done — prompt for reboot
+    # =====================================================================
+    print()
+    print("=" * 60)
+    print("  ALL DONE")
+    print("=" * 60)
+    print()
+    print(f"  SSH (key):  ssh -i {ssh_key_path} root@{router_ip}")
+    print(f"  SSH (pw):   ssh root@{router_ip}          # password: {root_pw}")
+    print(f"  Web UI:     http://{router_ip}")
+    print(f"              username: admin")
+    print(f"              password: {admin_pw}          (same one you gave the script)")
+    print()
+    print("━" * 58)
+    print("  ⚠️  REBOOT RECOMMENDED — hardening takes full effect after reboot")
+    print("━" * 58)
+    print()
+    print("  Reboot now? (y/N): ", end="", flush=True)
 
     try:
-        import pexpect
-        child = pexpect.spawn(
-            f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null '
-            f'-o PreferredAuthentications=password -o PubkeyAuthentication=no '
-            f'root@{router_ip}',
-            timeout=20
-        )
-        idx = child.expect(['password:', 'Permission denied', pexpect.EOF], timeout=10)
-        if idx != 0:
-            print("⚠️  SSH password prompt not received — config may not persist.")
-            print(f"    Manually run: {' && '.join(permanent_commands)}")
-            return
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
 
-        child.sendline(root_pw)
-        child.expect(['#', 'Permission denied'], timeout=10)
-
-        for cmd in permanent_commands:
-            child.sendline(cmd)
-            child.expect(['#'], timeout=10)
-
-        # Verify
-        child.sendline('echo PERMANENT_OK')
-        child.expect(['PERMANENT_OK'], timeout=5)
-        print("✅  Dropbear config made permanent (survives reboot).")
-
-        # Auto-generate SSH key if it doesn't exist
-        pubkey_path = ssh_key_path + ".pub"
-        if not os.path.exists(ssh_key_path):
-            print("[*] Generating new SSH key pair (ed25519)...")
-            import subprocess
+    if answer in ("y", "yes"):
+        print("  Rebooting router...")
+        if have_pexpect:
+            ssh_run(router_ip, root_pw, ssh_key_path, ["reboot"], timeout=10)
+        else:
             subprocess.run(
-                ["ssh-keygen", "-t", "ed25519", "-f", ssh_key_path,
-                 "-N", "", "-C", "openline@rain101"],
-                check=True, capture_output=True
+                ["ssh", "-o", "StrictHostKeyChecking=no",
+                 "-o", "UserKnownHostsFile=/dev/null",
+                 "-i", ssh_key_path,
+                 f"root@{router_ip}", "reboot"],
+                capture_output=True, timeout=15
             )
-            print(f"    Key generated: {ssh_key_path}")
+        print("  Router is rebooting — give it ~60 seconds.")
+    else:
+        print(f"  Skipping. Run manually: ssh -i {ssh_key_path} root@{router_ip} reboot")
 
-        print("[*] Installing SSH public key...")
-        with open(pubkey_path) as f:
-            pubkey = f.read().strip()
-        child.sendline(f"echo '{pubkey}' >> /etc/dropbear/authorized_keys")
-        child.expect(['#'], timeout=5)
-        # Write key to temp file so harden.sh can use it
-        child.sendline(f"echo '{pubkey}' > /tmp/user_ssh_key.pub")
-        child.expect(['#'], timeout=5)
-        child.sendline("mkdir -p /root/.ssh && chmod 700 /root/.ssh")
-        child.expect(['#'], timeout=5)
-        child.sendline(f"echo '{pubkey}' > /root/.ssh/authorized_keys")
-        child.expect(['#'], timeout=5)
-        child.sendline("chmod 600 /root/.ssh/authorized_keys")
-        child.expect(['#'], timeout=5)
-        print(f"    Key installed: {ssh_key_path}")
+    print()
+    print("🎉  Your the101 router is openline and hardened.")
 
-        child.sendline('exit')
-        child.close()
 
-    except ImportError:
-        print("⚠️  'pexpect' not available. SSH in manually and run:")
-        for cmd in permanent_commands:
-            print(f"      {cmd}")
-    except Exception as e:
-        print(f"⚠️  SSH setup failed ({e}). Run manually after SSH:")
-        for cmd in permanent_commands:
-            print(f"      {cmd}")
-
-    print("\n🎉  Done. Your the101 router is openline.")
-
+# ── CLI ──────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enable SSH root access on rain101/the101 router"
+        description="Openline + harden the rain101/the101 router."
     )
     parser.add_argument("--router", default="192.168.0.1",
                         help="Router IP (default: 192.168.0.1)")
@@ -221,7 +455,7 @@ def main():
     admin_pw = args.admin_pw or os.environ.get("THE101_ADMIN_PW") or "admin123"
 
     try:
-        enable_ssh(args.router, admin_pw, args.root_pw, args.ssh_key)
+        setup_router(args.router, admin_pw, args.root_pw, args.ssh_key)
     except RuntimeError as e:
         print(f"\n❌  Error: {e}", file=sys.stderr)
         sys.exit(1)

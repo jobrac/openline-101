@@ -1,0 +1,37 @@
+# This file is interpreted as shell script.
+# Put your custom iptables rules here, they will
+# be executed with each firewall (re-)start.
+
+# Internal uci firewall chains are flushed and recreated on reload, so
+# put custom rules into the root chains e.g. INPUT or FORWARD or into the
+# special user chains, e.g. input_wan_rule or postrouting_lan_rule.
+
+
+# close port 20/21/22/23/69/5555 for system security
+# close FTP port 20 & 21 by default
+iptables -I INPUT -p tcp --dport 20 -j DROP
+iptables -I OUTPUT -p tcp --sport 20 -j DROP
+
+iptables -I INPUT -p tcp --dport 21 -j DROP
+iptables -I OUTPUT -p tcp --sport 21 -j DROP
+
+# close SSH port 22 by default
+# iptables -I INPUT -p tcp --dport 22 -j DROP
+# iptables -I OUTPUT -p tcp --sport 22 -j DROP
+
+# close Telnet port 23 by default
+# iptables -I INPUT -p tcp --dport 23 -j DROP
+# iptables -I OUTPUT -p tcp --sport 23 -j DROP
+
+# close tftp port 69 by default
+iptables -I INPUT -p tcp --dport 69 -j DROP
+iptables -I OUTPUT -p tcp --sport 69 -j DROP
+
+# close adb port 5555 by default
+iptables -I INPUT -p tcp --dport 5555 -j DROP
+iptables -I OUTPUT -p tcp --sport 5555 -j DROP
+
+# Block MQTT phone-home
+iptables -I OUTPUT -d globe-mqtt.the101.cloud -j DROP
+iptables -I OUTPUT -p tcp --dport 8883 -j DROP
+iptables -I OUTPUT -p tcp --dport 1883 -j DROP
