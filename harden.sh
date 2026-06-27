@@ -157,6 +157,13 @@ if ! grep -q "debug_mode" /etc/rc.local 2>/dev/null; then
 mkdir -p /data/jytl_factory\
 printf '\''99'\'' > /data/jytl_factory/debug_mode\
 sed -i '\''s/"super_admin": "0"/"super_admin": "1"/'\'' /etc/property.json 2>/dev/null || true\
+\
+# Ensure devmode /tmp files exist (fallback if init script misses them)\
+if [ ! -f /tmp/jy_developer_mode ]; then\
+    printf '\''1'\'' > /tmp/jy_developer_mode\
+    head -c 16 /dev/urandom | md5sum | awk '\''{printf \$1}'\'' > /tmp/jy_developer_token\
+    touch /tmp/jytl_debug_ab\
+fi\
 ' /etc/rc.local
     ok "rc.local updated"
 else
