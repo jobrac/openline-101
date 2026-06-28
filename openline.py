@@ -27,6 +27,51 @@ import time
 import subprocess
 
 
+# ── Firmware version → pre-patched binaries mapping ──────────────────────
+# Each key is a firmware version string (matching the router's reported
+# release).  The value is the directory name under binaries/ that holds
+# the pre-patched files for that version.
+# To add support for a new firmware version: add an entry here and create
+# the corresponding folder inside binaries/ with the required files.
+
+SUPPORTED_VERSIONS = {
+    "RA_M1_v7.00.02g": "RA_M1_v7.00.02g",
+}
+
+DEFAULT_VERSION = "RA_M1_v7.00.02g"
+
+
+def resolve_binaries_dir(firmware_ver=None):
+    """Return the absolute path to the pre-patched binaries directory.
+
+    Looks up *firmware_ver* in SUPPORTED_VERSIONS; falls back to
+    DEFAULT_VERSION when the version is None, unknown, or its mapped
+    directory doesn't exist on disk.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    def _dir_for_ver(ver):
+        mapped = SUPPORTED_VERSIONS.get(ver, ver)
+        return os.path.join(script_dir, "binaries", mapped)
+
+    if firmware_ver and firmware_ver in SUPPORTED_VERSIONS:
+        candidate = _dir_for_ver(firmware_ver)
+        if os.path.isdir(candidate):
+            return candidate
+        print(f"  ⚠️  Version {firmware_ver!r} is mapped but directory "
+              f"{candidate!r} is missing — falling back to default.")
+
+    # Fall back to default
+    default_dir = _dir_for_ver(DEFAULT_VERSION)
+    if os.path.isdir(default_dir):
+        if firmware_ver:
+            print(f"  ℹ️  Using default version: {DEFAULT_VERSION}")
+        return default_dir
+
+    # Last resort: return the default path anyway (caller checks isdir)
+    return default_dir
+
+
 # ── ubus helpers ─────────────────────────────────────────────────────────
 
 def ubus_call(router_ip, session_id, obj, method, params=None):
@@ -74,6 +119,40 @@ def ubus_login(router_ip, username, password):
     if len(result) < 2 or not result[1]:
         raise RuntimeError(f"{username} login failed — wrong password?")
     return result[1]["ubus_rpc_session"]
+
+
+# ── Version detection ────────────────────────────────────────────────────
+
+def detect_firmware_version(router_ip, ssh_key_path):
+    """Try to detect the router's firmware version by reading
+    ``/etc/jytl-version`` over SSH.
+
+    Returns a version string like ``"RA_M1_v7.00.02g"`` on success, or
+    ``None`` if the file can't be read or parsed.
+    """
+    import re
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null",
+             "-o", "PreferredAuthentications=publickey,password",
+             "-i", ssh_key_path,
+             f"root@{router_ip}", "cat /etc/jytl-version"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            # Lines look like:             "version":"RA_M1_v7.00.02g"
+            m = re.search(r'"version"\s*:\s*"([^"]+)"', result.stdout)
+            if m:
+                return m.group(1)
+            # Fallback: try easycwmp config
+            m = re.search(r"option software_version '([^']+)'",
+                          result.stdout)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
 
 
 # ── SSH helpers ──────────────────────────────────────────────────────────
@@ -220,10 +299,8 @@ def setup_router(router_ip, admin_pw, root_pw, ssh_key_path):
             "config": "dropbear"
         })
         print("      PasswordAuth=on, RootPasswordAuth=on.")
-        uci_ok = True
     except RuntimeError:
         print("      PasswordAuth deferred (will fix via SSH in Phase 2).")
-        uci_ok = False
 
     # 4e: Enable dropbear at boot and restart
     try:
@@ -323,8 +400,17 @@ def setup_router(router_ip, admin_pw, root_pw, ssh_key_path):
 
         # Copy pre-patched binaries to router so harden.sh can install them.
         # This avoids fragile runtime patching — the files are just copied.
-        binaries_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "binaries", "v7.00.02g")
+        # Firmware version is auto-detected from the modem; falls back to
+        # DEFAULT_VERSION when detection fails or the version isn't mapped.
+        print("[*] Detecting firmware version...")
+        firmware_ver = detect_firmware_version(router_ip, ssh_key_path)
+        if firmware_ver:
+            print(f"      Detected: {firmware_ver}")
+        else:
+            print("      Could not detect — will use default.")
+
+        binaries_dir = resolve_binaries_dir(firmware_ver)
+
         if os.path.isdir(binaries_dir):
             print("[*] Copying pre-patched files to router...")
             for fname in ["dtoken.lua", "devmode", "luci-base.json", "firewall.user"]:

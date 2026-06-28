@@ -56,8 +56,18 @@ if [ -f "$BIN/devmode" ]; then
     cp "$BIN/devmode" /etc/init.d/devmode
     chmod +x /etc/init.d/devmode
     /etc/init.d/devmode enable 2>/dev/null || true
+    # Verify symlink was created; create manually if enable failed
+    if [ -L /etc/rc.d/S97devmode ]; then
+        ok "devmode init (S97devmode enabled)"
+    else
+        ln -sf ../init.d/devmode /etc/rc.d/S97devmode 2>/dev/null || true
+        if [ -L /etc/rc.d/S97devmode ]; then
+            ok "devmode init (symlink created manually)"
+        else
+            fail "devmode init symlink — developer pages may not survive reboot"
+        fi
+    fi
     /etc/init.d/devmode boot 2>/dev/null || true
-    ok "devmode init"
 else
     skip "devmode not in $BIN"
 fi
@@ -75,6 +85,47 @@ if [ -f "$BIN/firewall.user" ]; then
     ok "firewall.user"
 else
     skip "firewall.user not in $BIN"
+fi
+
+# ── 3b. Patch api_system.lua to respect debug_mode=99 ──────────
+echo "[3b] Patching api_system.lua (get_develop_mode bypass)..."
+API_SYSTEM="/usr/lib/lua/luci/model/functions/api_system.lua"
+API_BAK="/usr/lib/lua/luci/model/functions/api_system.luac.bak"
+
+if ! grep -q "debug_mode.*bypass\|is_debug_mode" "$API_SYSTEM" 2>/dev/null; then
+    # Backup the original compiled file
+    [ ! -f "$API_BAK" ] && cp "$API_SYSTEM" "$API_BAK"
+
+    # Replace with source wrapper that patches get_develop_mode
+    cat > "$API_SYSTEM" << 'APIPATCHEOF'
+-- api_system.lua — wrapper that patches get_develop_mode for debug_mode=99
+local orig_path = "/usr/lib/lua/luci/model/functions/api_system.luac.bak"
+local orig_func = loadfile(orig_path)
+if not orig_func then return {} end
+orig_func()
+local M = _G
+for part in ("luci.model.functions.api_system"):gmatch("[^.]+") do M = M[part] end
+if M and type(M) == "table" and M.get_develop_mode then
+    local dt = require "luci.dtoken"
+    local orig_get = M.get_develop_mode
+    M.get_develop_mode = function()
+        if dt.is_debug_mode() then return 1 end
+        return orig_get()
+    end
+end
+return M or {}
+APIPATCHEOF
+    ok "api_system.lua patched (debug_mode bypass)"
+else
+    ok "api_system.lua already patched"
+fi
+
+# Also ensure DBG_MODE is set to yes
+if grep -q "DBG_MODE:no" /etc/jytl-version 2>/dev/null; then
+    sed -i 's/DBG_MODE:no/DBG_MODE:yes/' /etc/jytl-version
+    ok "DBG_MODE set to yes"
+else
+    ok "DBG_MODE already yes or not present"
 fi
 
 # ── 4. Remove rm wrapper (causes login issues) ────────────────────
@@ -151,23 +202,26 @@ ok "AT ports firewalled (localhost only)"
 
 # ── 10. Persist across reboots ────────────────────────────────────
 echo "[10/10] Ensuring boot persistence..."
-if ! grep -q "debug_mode" /etc/rc.local 2>/dev/null; then
-    sed -i '/^exit 0$/i\
-# Developer mode persistence\
-mkdir -p /data/jytl_factory\
-printf '\''99'\'' > /data/jytl_factory/debug_mode\
-sed -i '\''s/"super_admin": "0"/"super_admin": "1"/'\'' /etc/property.json 2>/dev/null || true\
-\
-# Ensure devmode /tmp files exist (fallback if init script misses them)\
-if [ ! -f /tmp/jy_developer_mode ]; then\
-    printf '\''1'\'' > /tmp/jy_developer_mode\
-    head -c 16 /dev/urandom | md5sum | awk '\''{printf \$1}'\'' > /tmp/jy_developer_token\
-    touch /tmp/jytl_debug_ab\
-fi\
-' /etc/rc.local
+if ! grep -q "openline developer persistence v2" /etc/rc.local 2>/dev/null; then
+    sed -i '/^exit 0$/d' /etc/rc.local
+    cat >> /etc/rc.local << 'ENDOFPERSIST'
+# openline developer persistence v2
+mkdir -p /data/jytl_factory
+printf '99' > /data/jytl_factory/debug_mode
+sed -i 's/"super_admin": "0"/"super_admin": "1"/' /etc/property.json 2>/dev/null || true
+
+# Ensure devmode /tmp files exist (fallback if init script misses them)
+if [ ! -f /tmp/jy_developer_mode ]; then
+    printf '1' > /tmp/jy_developer_mode
+    head -c 16 /dev/urandom | md5sum | awk '{printf $1}' > /tmp/jy_developer_token
+    touch /tmp/jytl_debug_ab
+fi
+
+exit 0
+ENDOFPERSIST
     ok "rc.local updated"
 else
-    ok "rc.local already has debug_mode"
+    ok "rc.local already has persistence v2"
 fi
 
 # ── Restart services + ensure devmode files ─────────────────────

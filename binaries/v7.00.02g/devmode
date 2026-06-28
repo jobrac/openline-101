@@ -1,9 +1,0 @@
-#!/bin/sh /etc/rc.common
-START=97
-boot() {
-    printf '1' > /tmp/jy_developer_mode
-    head -c 16 /dev/urandom | md5sum | awk '{printf $1}' > /tmp/jy_developer_token
-    touch /tmp/jytl_debug_ab
-    echo None > /var/ate_agent
-}
-start() { boot; }
