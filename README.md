@@ -124,7 +124,11 @@ A successful run prints each step and ends with 🎉:
 
 ### Screenshots
 
-_No real-device screenshots yet._ Screenshots from genuine runs are welcome — on Linux, Android (Termux), or Windows.
+| Platform | Screenshot |
+|---|---|
+| 🐧 **Linux** | _add your capture as `images/linux.png `_ |
+| 📱 **Android (Termux)** | _add your capture as `images/android.png`_ |
+| 🪟 **Windows (PowerShell)** | <img src="images/windows.png" alt="openline.py on Linux" width="434" height="327"> |
 
 > **Want to contribute a screenshot?** Run it on your device, screenshot the terminal from the banner through the 🎉 line, and save it as `images/linux.png` / `images/android.png` / `images/windows.png`.
 > **Before sharing a screenshot, censor:** the `root123` line (if you changed it), anything after `# password:`, and any MAC/serial shown. Your admin password is typed at a hidden prompt, so it won't appear — but don't pass it with `--admin-pw` when capturing, or it'll show in the command line.
