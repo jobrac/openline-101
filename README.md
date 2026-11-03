@@ -70,6 +70,8 @@ When it finishes you'll see **🎉 Your the101 router is openline and hardened.*
 
 ## 📸 What it looks like
 
+> ⚠️ **Illustrative example** — this is what the output is *designed* to look like, not a capture from a verified run. The tool has not yet been confirmed on real hardware.
+
 A successful run prints each step and ends with 🎉:
 
 ```text
@@ -122,13 +124,9 @@ A successful run prints each step and ends with 🎉:
 
 ### Screenshots
 
-| Platform | Screenshot |
-|---|---|
-| 🐧 **Linux** | ![openline.py on Linux](images/linux.png) |
-| 📱 **Android (Termux)** | _add your capture as `images/android.png`_ |
-| 🪟 **Windows (PowerShell)** | _add your capture as `images/windows.png`_ |
+_No real-device screenshots yet._ Screenshots from genuine runs are welcome — on Linux, Android (Termux), or Windows.
 
-> **Want to contribute Android/Windows screenshots?** Run it on your device, screenshot the terminal from the banner through the 🎉 line, and save it as `images/android.png` / `images/windows.png`.
+> **Want to contribute a screenshot?** Run it on your device, screenshot the terminal from the banner through the 🎉 line, and save it as `images/linux.png` / `images/android.png` / `images/windows.png`.
 > **Before sharing a screenshot, censor:** the `root123` line (if you changed it), anything after `# password:`, and any MAC/serial shown. Your admin password is typed at a hidden prompt, so it won't appear — but don't pass it with `--admin-pw` when capturing, or it'll show in the command line.
 
 ---
