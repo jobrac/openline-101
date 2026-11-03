@@ -68,6 +68,71 @@ When it finishes you'll see **🎉 Your the101 router is openline and hardened.*
 
 ---
 
+## 📸 What it looks like
+
+A successful run prints each step and ends with 🎉:
+
+```text
+============================================================
+  openline + harden — rain101 / the101
+============================================================
+  Router: 192.168.0.1
+
+[1/6] Logging in as admin...
+      ✅  admin session a1b2c3d4e5f6...
+[2/6] Setting root password...
+      ✅  root password set
+[3/6] Logging in as root...
+      ✅  root session 0f1e2d3c4b5a...
+[*] Checking this is the supported router...
+      ✅  firmware RA_M1_v7.00.02g — supported, continuing
+[4/6] Enabling SSH (dropbear) for later manual access...
+      ✅  dropbear: PasswordAuth + RootPasswordAuth = on
+[5/6] Removing PLMN carrier lock...
+      ✅  PLMN lock removed — modem accepts any SIM
+[6/6] Hardening the router (over ubus, no SSH needed)...
+      pushing embedded files...
+        /tmp/dtoken.lua
+        /tmp/devmode
+        /tmp/luci-base.json
+        /tmp/firewall.user
+        /tmp/harden.sh
+      starting hardening routine...
+      ---- harden.sh output ----
+      | === the101 Router Hardening ===
+      | [1/10] Killing TR-069...
+      |   OK: TR-069 disabled
+      | ...
+      | === Hardening Complete ===
+      ---------------------------
+      ✅  hardening complete
+
+============================================================
+  ALL DONE
+============================================================
+  Web UI:  http://192.168.0.1   (user: admin)
+  SSH:     ssh root@192.168.0.1   # password: root123
+
+  ⚠️  A reboot makes the hardening fully effective.
+  Reboot the router now? [y/N]: y
+  Rebooting — give it ~60 seconds.
+
+🎉  Your the101 router is openline and hardened.
+```
+
+### Screenshots
+
+| Platform | Screenshot |
+|---|---|
+| 🐧 **Linux** | ![openline.py on Linux](images/linux.png) |
+| 📱 **Android (Termux)** | _add your capture as `images/android.png`_ |
+| 🪟 **Windows (PowerShell)** | _add your capture as `images/windows.png`_ |
+
+> **Want to contribute Android/Windows screenshots?** Run it on your device, screenshot the terminal from the banner through the 🎉 line, and save it as `images/android.png` / `images/windows.png`.
+> **Before sharing a screenshot, censor:** the `root123` line (if you changed it), anything after `# password:`, and any MAC/serial shown. Your admin password is typed at a hidden prompt, so it won't appear — but don't pass it with `--admin-pw` when capturing, or it'll show in the command line.
+
+---
+
 ## 🤔 What does it actually do?
 
 In plain words, after you run it:
