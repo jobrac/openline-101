@@ -126,7 +126,7 @@ A successful run prints each step and ends with 🎉:
 
 | Platform | Screenshot |
 |---|---|
-| 🐧 **Linux** | _add your capture as `images/linux.png ` |
+| 🐧 **Linux** | _add your capture as `images/linux.png `_ |
 | 📱 **Android (Termux)** | _add your capture as `images/android.png`_ |
 | 🪟 **Windows (PowerShell)** | <img src="images/windows.png" alt="openline.py on Linux" width="434" height="327"> |
 
